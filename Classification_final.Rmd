@@ -1,0 +1,546 @@
+---
+title: "Classification"
+output:
+  html_document: default
+  pdf_document: default
+date: "2024-10-25"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r message=FALSE, warning=FALSE}
+library(dplyr)
+library(tidyverse)
+library(ggplot2)
+library(zoo)
+library(xts)
+library(rlang)
+#library(ggpmisc)
+library(car)
+library(psych)
+library(e1071)
+library(corrplot)
+library(MASS)
+library(lares)
+library(cluster)
+library(factoextra)
+# library(ggiraphExtra)
+library(fpc)
+library(dbscan)
+```
+
+## Pre-processing
+
+```{r}
+spotify <- read.csv("dataset.csv")
+head(spotify)
+
+colSums(is.na(spotify))
+
+spotify <- spotify[!duplicated(spotify$track_id),]
+unique_values <- unique(spotify$explicit)
+
+spotify_clean <- spotify %>%
+  dplyr::select(-c(track_id, X)) %>%
+  mutate(
+    track_genre = as.factor(track_genre),
+    time_signature = as.factor(time_signature),
+    mode = as.factor(mode),
+    key = as.factor(key),
+    explicit = case_when(
+      tolower(trimws(explicit)) == "true" ~ 1,
+      tolower(trimws(explicit)) == "false" ~ 0
+    )
+  )
+unique_values <- unique(spotify_clean$explicit)
+```
+
+## EDA
+
+```{r}
+spotify_clean_numeric <- spotify_clean[, sapply(spotify_clean, is.numeric)]
+par(mfrow=c(3,3))
+for(i in 1:ncol(spotify_clean_numeric)) {
+  hist(spotify_clean_numeric[, i], main = paste("Histogram of", names(spotify_clean_numeric)[i]),
+       xlab = names(spotify_clean_numeric)[i], col = "lightblue", border = "black")
+}
+apply(spotify_clean_numeric, 2, skewness)
+
+cor_matrix <- cor(spotify_clean_numeric, use = "complete.obs")
+corrplot(cor_matrix, method = "circle", type = "lower",
+         tl.cex = 0.8, tl.col = "black", tl.srt = 45)
+
+spotify_clean_numeric <- spotify_clean[, sapply(spotify_clean, is.numeric)]
+par(mfrow=c(3,3))
+for(i in 1:ncol(spotify_clean_numeric)) {
+  hist(spotify_clean_numeric[, i], main = paste("Histogram of", names(spotify_clean_numeric)[i]),
+       xlab = names(spotify_clean_numeric)[i], col = "lightblue", border = "black")
+}
+apply(spotify_clean_numeric, 2, skewness)
+
+cor_matrix <- cor(spotify_clean_numeric, use = "complete.obs")
+corrplot(cor_matrix, method = "circle", type = "lower",
+         tl.cex = 0.8, tl.col = "black", tl.srt = 45)
+
+corr_cross(spotify_clean_numeric, max_pvalue = 0.05)
+
+boxplot(popularity~mode, data=spotify_clean, main = "Variation of popularity between modes",
+        xlab = "Popularity", ylab = "Mode", col = "lightblue", border = "black", horizontal = TRUE, notch = TRUE)
+
+boxplot(popularity~key, data=spotify_clean, main = "Variation of popularity between keys",
+        xlab = "Popularity", ylab = "Key", col = "lightblue", border = "black", horizontal = TRUE, notch = TRUE)
+
+boxplot(popularity~time_signature, data=spotify_clean, main = "Variation of popularity at different time signature",
+        xlab = "Popularity", ylab = "time signature", col = "lightblue", border = "black", horizontal = TRUE, notch = TRUE)
+
+boxplot(popularity~explicit, data=spotify_clean, main = "Variation of popularity with explicit",
+        xlab = "Popularity", ylab = "explicit", col = "lightblue", border = "black", horizontal = TRUE, notch = TRUE)
+
+boxplot(danceability~mode, data=spotify_clean, main = "Variation of danceability between modes",
+        xlab = "Danceability", ylab = "Mode", col = "lightblue", border = "black", horizontal = TRUE, notch = TRUE)
+
+testRows = sample(nrow(spotify_clean),0.3*nrow(spotify_clean))
+test_data = spotify_clean[testRows, ]
+train_data = spotify_clean[-testRows, ]
+
+find_outliers <- function(col_name) {
+  Q1 <- quantile(col_name, 0.25, na.rm = TRUE)
+  Q3 <- quantile(col_name, 0.75, na.rm = TRUE)
+  IQR_value <- IQR(col_name, na.rm = TRUE)
+  lower_bound <- Q1 - 1.5 * IQR_value
+  upper_bound <- Q3 + 1.5 * IQR_value
+  outliers <- spotify_clean %>%
+    filter(col_name < lower_bound | col_name > upper_bound)
+  return(outliers)
+}
+
+popularity_outlier <- find_outliers(spotify_clean$popularity)
+duration_ms_outlier <- find_outliers(spotify_clean$duration_ms)
+danceability_outlier <- find_outliers(spotify_clean$danceability)
+energy_outlier <- find_outliers(spotify_clean$energy)
+loudness_outlier <- find_outliers(spotify_clean$loudness)
+speechiness_outlier <- find_outliers(spotify_clean$speechiness)
+acousticness_outlier <- find_outliers(spotify_clean$acousticness)
+instrumentalness_outlier <- find_outliers(spotify_clean$instrumentalness)
+liveness_outlier <- find_outliers(spotify_clean$liveness)
+valence_outlier <- find_outliers(spotify_clean$valence)
+tempo_outlier <- find_outliers(spotify_clean$tempo)
+
+average_popularity <- spotify_clean %>%
+  group_by(track_genre) %>%
+  summarise(average_popularity = mean(popularity, na.rm = TRUE)) %>%
+  arrange(desc(average_popularity))
+head(average_popularity)
+
+spotify_eda <- spotify_clean
+spotify_eda$cut_energy <- cut(spotify_clean$energy, breaks = 10)
+spotify_eda %>%
+  ggplot(aes(x=cut_energy)) +
+  geom_bar(width=0.2) +
+  coord_flip() +
+  scale_x_discrete(name="Energy")
+
+spotify_eda$cut_spe <- cut(spotify_clean$speechiness, breaks = 10)
+spotify_eda %>%
+  ggplot(aes(x=cut_spe)) +
+  geom_bar(width=0.2) +
+  coord_flip() +
+  scale_x_discrete(name="Spechiness")
+
+spotify_clean %>%
+  dplyr::select(track_name, artists, album_name, track_genre, popularity) %>%
+  group_by(artists) %>%
+  filter(!is.na(track_name)) %>%
+  filter(!is.na(artists)) %>%
+  filter(!is.na(album_name)) %>%
+  arrange(desc(popularity)) %>%
+  head(n = 10)
+
+```
+
+## Scaling
+
+```{r}
+num_var <- spotify_clean %>%
+  select_if(is.numeric)
+num_scaled <- scale(num_var)
+
+data <- spotify_clean %>%
+  select_if(~!is.numeric(.)) %>%
+  cbind(num_scaled)
+
+data <- data[, !(names(data) %in% c("artists", "album_name", "track_name", "track_genre","key", "mode", "time_signature"))]
+```
+
+## Clustering
+
+```{r warning=FALSE}
+set.seed(7406)
+k2 <- kmeans(data, centers = 2, nstart = 20)
+
+fviz_cluster(k2, data = data)
+
+small_data <- data %>%
+  slice_sample(prop = 0.1)
+
+fviz_nbclust(small_data, kmeans, method = "wss")
+
+wss <- function(k) {
+  kmeans(small_data, k, nstart = 20, iter.max = 40)$tot.withinss
+}
+k.values <- 1:15
+wss_values <- map_dbl(k.values, wss)
+plot(k.values, wss_values, type="b", pch = 19, frame = FALSE,
+     xlab="Number of clusters K", ylab="Total within-clusters sum of squares")
+
+set.seed(7406)
+wss <- function(k) {
+  kmeans(data, k, nstart = 20, iter.max = 40)$tot.withinss
+}
+k.values <- 1:15
+wss_values <- map_dbl(k.values, wss)
+plot(k.values, wss_values, type="b", pch = 19, frame = FALSE,
+     xlab="Number of clusters K", ylab="Total within-clusters sum of squares")
+
+set.seed(7406)
+fviz_nbclust(small_data, kmeans, method = "silhouette")
+
+set.seed(7606)
+km8 <- kmeans(data, 8, nstart = 20)
+fviz_cluster(km8, data = data)
+
+set.seed(7606)
+km4 <- kmeans(data, 4, nstart = 20)
+fviz_cluster(km4, data = data)
+
+set.seed(7406)
+km3 <- kmeans(data, 3, nstart = 20)
+fviz_cluster(km3, data = data)
+```
+
+## Cluster Analysis
+
+```{r}
+song_cluster4 <- num_var %>%
+  mutate(cluster = km4$cluster) %>%
+  group_by(cluster) %>%
+  summarise_all("mean")
+
+# ggRadar(data=song_cluster4, mapping = aes(colours = cluster), interactive = T)
+
+spotify_cluster4 <- spotify_clean
+spotify_cluster4$cluster <- km4$cluster
+head(spotify_cluster4)
+
+song_cluster8 <- num_var %>%
+  mutate(cluster = km8$cluster) %>%
+  group_by(cluster) %>%
+  summarise_all("mean")
+
+spotify_cluster8 <- spotify_clean
+spotify_cluster8$cluster <- km8$cluster
+head(spotify_cluster8)
+```
+
+## DBSCAN
+
+```{r}
+data <- spotify_clean %>%
+  select_if(~!is.numeric(.)) %>%
+  cbind(num_scaled)
+
+data <- data[, !(names(data) %in% c("artists", "album_name", "track_name", "track_genre","key", "mode", "time_signature"))]
+
+k <- 10 
+kNNdistplot(data, k)
+abline(h = 2, lty = 2)
+ 
+set.seed(7406)
+db = dbscan(data, eps = 2, minPts = 24)
+set.seed(7406)
+fviz_cluster(db, data = data, stand = FALSE,
+             ellipse = FALSE, show.clust.cent = FALSE,
+             geom = "point")
+```
+
+## Classification
+
+```{r message=FALSE, warning=FALSE}
+library(dplyr)
+library(class)
+library(caret)
+library(cluster)
+library(factoextra)
+
+set.seed(123)
+data$cluster <- as.factor(km4$cluster)
+
+# Take a 10% random sample from the clustered dataset
+spotify_sample <- data %>%
+  slice_sample(prop = 0.3)
+
+# Split data into training and testing sets
+set.seed(123)
+trainIndex <- createDataPartition(spotify_sample$cluster, p = .7, list = FALSE)
+train_data <- spotify_sample[trainIndex, ]
+test_data <- spotify_sample[-trainIndex, ]
+
+# Train KNN model
+knn_model <- train(cluster ~ .,
+  data = train_data,
+  method = "knn",
+  tuneLength = 10)
+
+# Predict clusters on test data
+predictions <- predict(knn_model, newdata = test_data)
+
+# Evaluate Model
+conf_matrix <- confusionMatrix(predictions, test_data$cluster)
+print(conf_matrix)
+```
+
+```{r}
+# View the tuning results for each k value
+library(knitr)
+knn_results <- knn_model$results
+kable(knn_results)
+```
+
+```{r}
+# View the best k selected during tuning
+print(knn_model$bestTune)
+```
+
+```{r}
+# Load libraries
+library(ggplot2)
+library(caret)
+
+# Example: Generate a confusion matrix
+# Replace `true_labels` and `predicted_labels` with your actual labels
+true_labels <- factor(c("A", "A", "B", "B", "A", "B", "A", "A", "B", "B"))
+predicted_labels <- factor(c("A", "B", "B", "B", "A", "A", "A", "B", "B", "B"))
+
+# Create confusion matrix
+conf_df <- as.data.frame(conf_matrix$table)
+
+# Pretty plot
+ggplot(data = conf_df, aes(x = Reference, y = Prediction)) +
+  geom_tile(aes(fill = Freq), color = "white") +
+  scale_fill_gradient(low = "lightblue", high = "blue3") +
+  geom_text(aes(label = Freq), color = "white", size = 5) +
+   labs(title = "Confusion Matrix",
+       x = "True Labels",
+       y = "Predicted Labels",
+       fill = "Count") +
+  theme_minimal() +
+  theme(
+    plot.title = element_text(hjust = 0.5, face = "bold", size = 16),
+    axis.text = element_text(size = 12),
+    axis.title = element_text(size = 14)
+  )
+```
+
+## Recommendations
+
+#### Example 1: Johann Sebastian Bach - Classical music
+
+```{r message=FALSE, warning=FALSE}
+library(FNN)
+library(knitr)
+set.seed(123)
+
+# Pick input song
+song1 <- test_data[1, -which(names(test_data) == "cluster")]
+
+data <- spotify_clean %>%
+  select_if(~!is.numeric(.)) %>%
+  cbind(num_scaled)
+
+song_info <- song1 %>%
+  left_join(data, by = colnames(num_scaled)) %>%
+  slice(1)
+
+# Display name information of song recommendations
+table <- subset(song_info, select = c(artists, album_name, track_name, track_genre))
+
+clust = c(2)
+table$cluster = clust
+kable(table, format = "html", align = "l")
+kable(song_info)
+```
+
+```{r}
+# Find 10 nearest neighbors
+#neighbors <- get.knnx(train_data, song1, k = 15)
+neighbors <- get.knnx(train_data[, -which(names(train_data) == "cluster")], song1, k = 10)
+
+# Extract the indices of the 10 nearest neighbors
+neighbor_indices <- neighbors$nn.index[1, ]
+
+# Get recommended songs
+recommended_songs <- train_data[neighbor_indices, ]
+# recommended_songs_info <- recommended_songs[, -which(names(recommended_songs) == "cluster")] # remove cluster column if not needed
+
+# Move row names to a column named "index"
+kable(rownames_to_column(recommended_songs, var = "index"))
+```
+
+```{r}
+final_rec <- recommended_songs %>%
+  left_join(data, by = colnames(num_scaled))
+
+# Display name information of song recommendations
+kable(subset(final_rec, select = c(artists, album_name, track_name, track_genre, cluster)))
+```
+
+##### Visualizations
+
+```{r}
+library(ggplot2)
+song1 <- test_data[1, ]
+
+# Add other data points from the dataset (excluding the cluster for clarity)
+other_data <- train_data[train_data$cluster != 2, ]
+other_data <- other_data %>%
+  slice_sample(prop = 0.1)
+
+# Combine the input song, nearest neighbors, and other data points
+plot_data <- rbind(
+  data.frame(danceability = song1$danceability, energy = song1$energy, Label = "Input Song"),
+  data.frame(danceability = recommended_songs$danceability, energy = recommended_songs$energy, Label = "Neighbors"),
+  data.frame(danceability = other_data$danceability, energy = other_data$energy, Label = "Other Songs")
+)
+
+# Create the scatter plot with all points
+plot1 <- ggplot(plot_data, aes(x = danceability, y = energy, color = Label)) +
+  geom_point(size = 3, alpha = 0.7) +
+  scale_color_manual(values = c("Input Song" = "red", "Neighbors" = "blue", "Other Songs" = "gray")) +
+  labs(x = "Danceability",
+       y = "Energy") +
+  theme_minimal() +
+  theme(legend.title = element_blank())
+
+```
+
+```{r}
+# Combine the input song, nearest neighbors, and other data points
+plot_data <- rbind(
+  data.frame(popularity = song1$popularity, energy = song1$energy, Label = "Input Song"),
+  data.frame(popularity = recommended_songs$popularity, energy = recommended_songs$energy, Label = "Neighbors"),
+  data.frame(popularity = other_data$popularity, energy = other_data$energy, Label = "Other Songs")
+)
+
+# Create the scatter plot with all points
+plot2 <- ggplot(plot_data, aes(x = popularity, y = energy, color = Label)) +
+  geom_point(size = 3, alpha = 0.7) +
+  scale_color_manual(values = c("Input Song" = "red", "Neighbors" = "blue", "Other Songs" = "gray")) +
+  labs(x = "Popularity",
+       y = "Energy") +
+  theme_minimal() +
+  theme(legend.title = element_blank())
+
+```
+
+```{r}
+library(gridExtra)
+
+grid.arrange(plot1, plot2, nrow = 2)
+```
+
+#### Example 2: Billie Eilish - pop/electro music
+
+```{r}
+# Pick input song
+set.seed(123)
+song2 <- test_data[5, -which(names(test_data) == "cluster")]
+
+Song_info2 <- song2 %>%
+  left_join(data, by = colnames(num_scaled)) %>%
+  slice(1)
+
+# Display name information of song recommendations
+kable(subset(Song_info2, select = c(artists, album_name, track_name, track_genre)))
+```
+
+```{r}
+# Find 5 nearest neighbors
+neighbors2 <- get.knnx(train_data[, -which(names(train_data) == "cluster")], song2, k = 5)
+
+# Extract the indices of the 10 nearest neighbors
+neighbor_indices2 <- neighbors2$nn.index[1, ]
+
+# Get recommended songs
+recommended_songs2 <- train_data[neighbor_indices2, ]
+# recommended_songs_info2 <- recommended_songs2[, -which(names(recommended_songs2) == "cluster")] # remove cluster column if not needed
+
+# Print numerical information of song recommendations
+print(recommended_songs2)
+```
+
+```{r}
+final_rec2 <- recommended_songs2 %>%
+  left_join(data, by = colnames(num_scaled))
+
+# Display name information of song recommendations
+kable(subset(final_rec2, select = c(artists, album_name, track_name, track_genre, cluster)))
+```
+
+#### Example 3: Nirvana - grunge/alt rock music
+
+```{r}
+set.seed(123) 
+song3 <- test_data[115, -which(names(test_data) == "cluster")]  
+song_info3 <- song3 %>%   
+  left_join(data, by = colnames(num_scaled)) %>%   
+  slice(1)
+
+# Display name information of song recommendations
+table3 <- subset(song_info3, select = c(artists, album_name, track_name, track_genre))
+
+table3$cluster = clust +1
+kable(table3, format = "html", align = "l")
+```
+
+```{r}
+neighbors3 <- get.knnx(train_data[, -which(names(train_data) == "cluster")], song3, k = 5)
+neighbor_indices3 <- neighbors3$nn.index[1, ] 
+recommended_songs3 <- train_data[neighbor_indices3, ]
+# recommended_songs_info3 <- recommended_songs3[, -which(names(recommended_songs2) == "cluster")]
+print(recommended_songs3)
+```
+
+```{r}
+final_rec3 <- recommended_songs3 %>%   
+  left_join(data, by = colnames(num_scaled))
+kable(subset(final_rec3, select = c(artists, album_name, track_name, track_genre, cluster)))
+```
+
+#### Example 4: Daddy Yankee - latin music
+
+```{r}
+set.seed(123) 
+song4 <- test_data[187, -which(names(test_data) == "cluster")]  
+song_info4 <- song4 %>%   
+  left_join(data, by = colnames(num_scaled)) %>%   
+  slice(1)
+
+# Display name information of song recommendations
+table4 <- subset(song_info4, select = c(artists, album_name, track_name, track_genre))
+
+clust = 2
+table4$cluster = clust +2
+kable(table4, format = "html", align = "l")
+
+neighbors4 <- get.knnx(train_data[, -which(names(train_data) == "cluster")], song4, k = 5)
+neighbor_indices4 <- neighbors4$nn.index[1, ] 
+recommended_songs4 <- train_data[neighbor_indices4, ]
+```
+
+```{r}
+final_rec4 <- recommended_songs4 %>%   
+  left_join(data, by = colnames(num_scaled))
+kable(subset(final_rec4, select = c(artists, album_name, track_name, track_genre, cluster)))
+```
